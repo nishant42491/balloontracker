@@ -6,7 +6,7 @@ import datetime
 import json
 import plotly.graph_objects as go
 from predictor import predict_trajectory
-
+import os
 
 app = Dash(__name__)
 server = app.server
