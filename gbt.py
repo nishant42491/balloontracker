@@ -5,6 +5,8 @@ from dash import Dash, dcc, html, Input, Output
 import datetime
 import json
 import plotly.graph_objects as go
+from predictor import predict_trajectory
+
 
 app = Dash(__name__)
 server = app.server
@@ -42,6 +44,8 @@ def fetch_balloon_data():
     return df
 
 df = fetch_balloon_data()
+
+
 
 app.layout = html.Div([
     html.H1("🌍 Windborne Balloon Tracker (Live Last 24H)", style={"textAlign": "center"}),
@@ -94,6 +98,22 @@ app.layout = html.Div([
         dcc.Graph(id="map-trajectory", style={"height": "500px"})
     ], style={"width": "100%", "maxWidth": "900px", "margin": "auto"}),
 
+
+
+    html.Div([
+        html.H3("🚨 Live Balloon Alerts", style={"color": "crimson"}),
+        html.Div(id="alert-box", style={
+            "backgroundColor": "#fff3f3",
+            "border": "1px solid #ffcccc",
+            "padding": "10px",
+            "margin": "auto",
+            "maxWidth": "800px",
+            "borderRadius": "8px",
+            "whiteSpace": "pre-wrap"
+        }),
+    ]),
+
+    dcc.Interval(id="alert-interval", interval=30 * 1000, n_intervals=0),
     html.P("Data from Windborne Systems • Updates every run", style={"textAlign": "center", "marginTop": "2em"})
 ])
 
@@ -124,6 +144,7 @@ def update_maps(selected_hour, color_by, selected_balloon_id):
     fig_current.update_layout(margin=dict(r=0, t=40, l=0, b=0))
 
     # --- TRAJECTORY MAP ---
+
     if selected_balloon_id is not None:
         balloon_df = df[df["id"] == selected_balloon_id].sort_values("time_hour_ago")
 
@@ -147,6 +168,28 @@ def update_maps(selected_hour, color_by, selected_balloon_id):
             title=f"Trajectory of Balloon {selected_balloon_id} (Last 24H)",
             margin=dict(r=0, t=40, l=0, b=0)
         )
+
+        predicted_path = predict_trajectory(df, selected_balloon_id, horizon=24)
+        if predicted_path is not None:
+            pred_lat, pred_lon = zip(*predicted_path)
+            hover_labels = [f"+{i + 1}h" for i in range(len(pred_lat))]
+
+            fig_traj.add_trace(go.Scattergeo(
+                lat=pred_lat,
+                lon=pred_lon,
+                mode="lines+markers",
+                marker=dict(
+                    size=4,
+                    color="orange",
+                    colorbar=None,  # 🚫 no colorbar
+                    showscale=False  # ✅ no scale
+                ),
+                line=dict(dash="dot", color="orange"),
+                name="Predicted Path (Next 24h)",
+                text=hover_labels,
+                hoverinfo="text",
+                showlegend=True  # Keep in legend
+            ))
     else:
         fig_traj = go.Figure()
         fig_traj.update_layout(
@@ -156,6 +199,47 @@ def update_maps(selected_hour, color_by, selected_balloon_id):
         )
 
     return fig_current, fig_traj
+
+@app.callback(
+    Output("alert-box", "children"),
+    Input("alert-interval", "n_intervals")
+)
+def generate_alerts(n_intervals):
+    selected_hour = 0  # Hardcoded
+
+    df_now = df[df["time_hour_ago"] == selected_hour].copy()
+    alerts = []
+    grouped = df[df["time_hour_ago"] <= selected_hour].groupby("id")
+
+    for _, balloon in grouped:
+        balloon = balloon.sort_values("time_hour_ago")
+
+        if balloon.empty or balloon.iloc[0]["time_hour_ago"] != selected_hour:
+            continue
+
+        current = balloon.iloc[0]
+        previous = balloon.iloc[1:]  # older timesteps
+
+        id = current["id"]
+        alt = current["alt"]
+        vspeed = current.get("vertical_speed", None)
+
+        if vspeed is not None and vspeed < -5:
+            alerts.append(f"🚨 Balloon {id} is descending rapidly (v_speed = {vspeed:.2f} km/h)")
+
+        if alt < 1:
+            alerts.append(f"⚠️ Balloon {id} is flying very low (altitude = {alt:.2f} km)")
+
+        if len(previous) >= 3:
+            lat_movement = (previous["lat"] != current["lat"]).sum()
+            lon_movement = (previous["lon"] != current["lon"]).sum()
+            if lat_movement == 0 and lon_movement == 0:
+                alerts.append(f"⚠️ Balloon {id} hasn't moved in 3+ hours")
+
+    if not alerts:
+        return "✅ All balloons look nominal."
+
+    return "\n".join(alerts)
 
 
 if __name__ == "__main__":
